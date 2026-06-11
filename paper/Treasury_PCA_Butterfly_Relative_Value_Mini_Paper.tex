@@ -1,0 +1,115 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,booktabs,hyperref}
+\usepackage{array}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+
+\title{Treasury PCA Butterfly and Relative Value: From Factor Residual to Implementable Trade}
+\author{Dhruv Kohli}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note explains the Treasury PCA butterfly project.  The project constructs a 2s5s10s Treasury butterfly that is neutral to level and slope principal components, studies whether the residual curvature spread mean-reverts, and then checks how the fixed-maturity signal degrades when mapped to actual Treasury securities.  The main contribution is the research workflow: isolate a factor residual, avoid lookahead, test stability, and confront implementation gaps.
+\end{abstract}
+
+\section{Question and intuition}
+A Treasury curve move can be decomposed into level, slope, and curvature factors.  A 2s5s10s butterfly is designed to remove broad level and slope exposure and leave a cleaner view on curvature.  In desk language, the idea is to trade the belly against the wings without simply being long or short duration.
+
+The naive version of this project is simple: run PCA once, build weights once, and backtest a z-score.  The presentation-ready version is stricter.  It asks which PCA is appropriate, whether the hedge uses future data, whether the residual is stationary, whether regimes matter, and whether an actual bond implementation tracks the fixed-maturity signal.
+
+\section{Data}
+The GSW fixed-maturity yield data set contains 16,097 observations from 1961-06-14 through 2025-12-26.  The Treasury bond panel contains 204,868 bond-date observations from 2022-01-03 through 2025-12-31.  The raw workbooks are intentionally ignored by Git; only code, notebooks, tests, documentation, and this paper are public.
+
+\section{PCA design}
+The project uses yield changes rather than yield levels.  Yield levels are persistent and can make PCA mostly describe slow-moving trends instead of tradable risk shocks.  Let $\Delta y_t$ be a vector of daily yield changes.  PCA estimates
+\[
+    \Delta y_t = L f_t + \epsilon_t,
+\]
+where the columns of $L$ are factor loadings.
+
+The notebook compares two variants.
+\begin{itemize}
+    \item Correlation PCA standardizes each maturity.  It is good for interpreting the shape of level, slope, and curvature factors.
+    \item Covariance PCA keeps yield-bp units.  It is more natural for hedge construction because a one-bp move at one maturity is not normalized away.
+\end{itemize}
+
+Both versions show the usual Treasury factor structure.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Factor & Correlation PCA variance & Covariance PCA variance \\
+\midrule
+PC1 & 88.09\% & 88.12\% \\
+PC2 & 8.67\% & 8.69\% \\
+PC3 & 2.32\% & 2.28\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Butterfly construction}
+The butterfly uses covariance PCA loadings and solves for weights $w=(w_2,w_5,w_{10})$ such that
+\[
+    w'L_1 = 0, \qquad w'L_2 = 0, \qquad w_5=-1.
+\]
+The final condition normalizes the trade as short the 5Y belly.  The static full-sample weights are:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Maturity & Weight \\
+\midrule
+2Y & 0.5777 \\
+5Y & -1.0000 \\
+10Y & 0.5026 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The resulting factor exposures are exactly neutral to PC1 and PC2 up to numerical precision, while retaining PC3 exposure of 0.3963.  This is the intended curvature residual.
+
+\section{Signal and stationarity diagnostics}
+The butterfly spread is
+\[
+    s_t = w_2 y_{2,t} + w_5 y_{5,t} + w_{10} y_{10,t}.
+\]
+A stationary spread would be more plausible for mean reversion.  The diagnostics are deliberately sobering: the ADF statistic is -2.316 with a p-value of 0.1669, and the estimated half-life is about 1,222 trading days.  That does not support an aggressive high-turnover mean-reversion story.
+
+The signal is a lagged rolling z-score,
+\[
+    z_t = \frac{s_t - \mu_{t-1}^{(126)}}{\sigma_{t-1}^{(126)}}.
+\]
+The lag matters: it prevents using today's close in both the signal and the P\&L.  The static backtest earns 303 bp total with an annualized Sharpe of 0.20, max drawdown of -158 bp, 10,736 active days, and 617 trades.  This is weak but informative: factor-neutrality alone is not alpha.
+
+\section{Walk-forward PCA}
+A full-sample PCA backtest uses future information.  The notebook therefore re-estimates PCA weights monthly using only the prior three years of yield changes.  Windows without complete 2Y, 5Y, and 10Y history are skipped.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Maturity & Mean weight & Std & Min & Max \\
+\midrule
+2Y & 0.8066 & 1.2355 & -8.5137 & 17.2066 \\
+5Y & -1.0000 & 0.0000 & -1.0000 & -1.0000 \\
+10Y & 0.3578 & 0.9859 & -12.9131 & 7.7876 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The wide rolling-weight range is itself an important finding.  It shows that local PCA hedge ratios can become unstable, especially when the curve regime changes.  The walk-forward backtest has 989 bp total P\&L but only a 0.023 annualized Sharpe and a -3,852 bp max drawdown.  The total P\&L is not the right headline; the drawdown and instability are.
+
+\section{Implementation gap}
+Fixed-maturity yield curves are clean research objects.  Actual trades require securities.  The notebook maps monthly rebalances to nearest available Treasury bonds around the 2Y, 5Y, and 10Y targets, then compares bond yield changes against GSW fixed-maturity changes.  This section is included because it is where many classroom relative-value projects become unrealistic.  Duration, bond selection, roll-down, accrued interest, and liquidity all matter.
+
+The implementation analysis is not meant to produce a final executable trading book.  It is meant to show the next level of research maturity: after a signal survives the clean model, check whether the instrument layer preserves or destroys it.
+
+\section{How to read the repo}
+Start with this paper for the intuition, then read \texttt{Treasury\_PCA\_Butterfly\_Relative\_Value.ipynb} for the executed analysis.  The reusable implementation lives in \texttt{src/treasury\_pca\_butterfly.py}, and the validation tests live in \texttt{tests/test\_treasury\_pca\_butterfly.py}.
+
+\section{Bottom line}
+The value of this project is not an overstated claim that a simple butterfly z-score is production alpha.  The value is the research process: use PCA to isolate a curvature residual, avoid lookahead, diagnose stationarity, measure regime fragility, and bridge the fixed-maturity signal to tradable bonds.  That is the workflow a rates relative-value researcher needs.
+
+\end{document}

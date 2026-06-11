@@ -1,0 +1,15 @@
+*.xlsx
+.DS_Store
+**/.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+*.png
+.pytest_cache/
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz

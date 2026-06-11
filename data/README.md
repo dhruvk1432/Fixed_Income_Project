@@ -1,0 +1,9 @@
+# Data contract
+
+Expected local files:
+
+- `gsw_yields.xlsx`: Gurkaynak-Sack-Wright fixed-maturity Treasury yields.
+- `treasury_panel_pca.xlsx`: Treasury bond panel used for implementation checks.
+
+These workbooks are intentionally ignored by git. Keep raw vendor/course data
+local and commit only code, notebooks, documentation, and aggregate diagnostics.
