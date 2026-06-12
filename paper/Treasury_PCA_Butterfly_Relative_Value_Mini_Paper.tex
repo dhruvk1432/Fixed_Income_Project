@@ -1,49 +1,176 @@
-\documentclass[11pt]{article}
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath,booktabs,graphicx,hyperref}
+\documentclass[12pt]{article}
+\usepackage[margin=0.95in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,graphicx}
+\usepackage[hypertexnames=false]{hyperref}
 \usepackage{array}
 \usepackage{float}
+\usepackage{setspace}
 \hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\setstretch{1.04}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 
-\title{Treasury PCA Butterfly and Relative Value: From Factor Residual to Implementable Trade}
+\title{\vspace{-0.6cm}Treasury PCA Butterflies, Carry, and Relative-Value Discipline}
 \author{Dhruv Kohli}
 \date{June 2026}
 
 \begin{document}
 \maketitle
+\vspace{-0.4cm}
+\noindent\rule{\textwidth}{0.4pt}
 
 \begin{abstract}
-This note explains the Treasury PCA butterfly project.  The project constructs a 2s5s10s Treasury butterfly that is neutral to level and slope principal components, studies whether the residual curvature spread mean-reverts, and then checks how the fixed-maturity signal degrades when mapped to actual Treasury securities.  The main contribution is the research workflow: isolate a factor residual, avoid lookahead, test stability, and confront implementation gaps.
+This paper asks whether a PCA-neutral 2s5s10s Treasury butterfly isolates a tradable
+curvature residual or only creates a clean-looking factor signal. I estimate Treasury
+principal components on daily yield changes, construct exact and regularized butterflies, test
+stationarity and walk-forward stability, and then add carry/rolldown, transaction costs,
+volatility targeting, and an actual-bond implementation check. The evidence is intentionally
+sobering. The exact full-sample butterfly is neutral to level and slope by construction, but the
+spread is not strongly stationary, rolling exact hedge ratios become unstable, and a stricter
+mean-reversion strategy loses money after realistic filters. A carry-aligned curvature-momentum
+rule is more researchable: it earns 307.47 bp with a 0.18 annualized Sharpe and a smaller
+drawdown, but it is still not production alpha. The paper's main contribution is therefore the
+research workflow. It shows how to move from a factor residual to a trade candidate without
+confusing factor neutrality with edge.
 \end{abstract}
 
-\section{Question and intuition}
-A Treasury curve move can be decomposed into level, slope, and curvature factors.  A 2s5s10s butterfly is designed to remove broad level and slope exposure and leave a cleaner view on curvature.  In desk language, the idea is to trade the belly against the wings without simply being long or short duration.
+\noindent\rule{\textwidth}{0.4pt}
 
-The naive version of this project is simple: run PCA once, build weights once, and backtest a z-score.  The presentation-ready version is stricter.  It asks which PCA is appropriate, whether the hedge uses future data, whether the residual is stationary, whether regimes matter, and whether an actual bond implementation tracks the fixed-maturity signal.
+\section{Introduction}
+
+Treasury relative-value trades often start from a simple intuition: broad yield-curve moves can be
+decomposed into level, slope, and curvature, and a butterfly can isolate the residual curvature
+component. In desk language, a 2s5s10s butterfly trades the belly against the wings. The trade is
+appealing because it appears to remove the most obvious macro duration bets while keeping
+exposure to curve shape.
+
+The empirical question is whether that residual is actually tradable. A butterfly can be neutral to
+the first two principal components and still fail as a strategy. The residual may not be stationary,
+hedge ratios may depend on the sample, carry may work against mean reversion, transaction costs
+may dominate, and fixed-maturity yields may not map cleanly to actual Treasury securities. This
+paper makes those frictions explicit.
+
+The project has two layers. The first layer reconstructs the classical PCA butterfly carefully. It
+uses yield changes rather than yield levels, compares correlation PCA with covariance PCA, solves
+2s5s10s weights that neutralize level and slope, and tests the resulting spread for stationarity and
+mean reversion. The second layer turns the factor residual into a trading-research object. It
+re-estimates hedge ratios walk-forward, introduces a regularized gross-capped hedge, adds
+carry/rolldown and cost-aware sizing, and checks whether nearest-bond implementation preserves
+the fixed-maturity signal.
+
+The main finding is not that the naive butterfly is a finished trade. The cleaned-up evidence
+rejects that story. The ADF test does not strongly reject a unit root in the static spread, the
+estimated half-life is about 1,222 trading days, exact rolling PCA weights can become explosive,
+and the enhanced mean-reversion specification loses 372.69 bp after costs. A carry-aligned
+curvature-momentum rule is more plausible because it respects the spread's observed persistence
+and the curve's own rolldown, but even that rule has only a modest Sharpe. The right conclusion is
+to continue the research around regularized hedge construction, carry-aware signals, and actual
+bond execution, not to present a naive z-score as alpha.
+
+The remainder of the paper is organized as follows. Section 2 places the design in the fixed-income
+factor and relative-value literatures. Section 3 describes the data. Section 4 defines the PCA,
+butterfly, and strategy objects. Section 5 reports the empirical results. Section 6 discusses the
+implementation gap. Section 7 concludes, and Appendix A gives a claim-by-claim audit of what
+the repo proves.
+
+\section{Related Literature}
+
+The factor structure follows Litterman and Scheinkman (1991), who show that level, slope, and
+curvature explain most Treasury yield-curve variation. This paper uses that result as a starting
+point rather than as a trading conclusion. A factor-neutral portfolio removes exposure to the
+estimated factors; it does not guarantee stationarity, positive carry, or executable P\&L.
+
+The return-predictability motivation is related to the fixed-income literature on bond risk premia
+and yield-curve factors, including Cochrane and Piazzesi (2005). The trading-friction layer is
+closer to fixed-income arbitrage work such as Duarte, Longstaff, and Yu (2007), where apparent
+relative-value opportunities must be interpreted through leverage, drawdown, funding, and
+implementation constraints. The empirical design also borrows the basic discipline of
+out-of-sample testing: hedge ratios and z-scores must be lagged or re-estimated walk-forward
+rather than fit once with future information.
 
 \section{Data}
-The GSW fixed-maturity yield data set contains 16,097 observations from 1961-06-14 through 2025-12-26.  The Treasury bond panel contains 204,868 bond-date observations from 2022-01-03 through 2025-12-31.  The raw workbooks are intentionally ignored by Git; only code, notebooks, tests, documentation, and this paper are public.
 
-\section{PCA design}
-The project uses yield changes rather than yield levels.  Yield levels are persistent and can make PCA mostly describe slow-moving trends instead of tradable risk shocks.  Let $\Delta y_t$ be a vector of daily yield changes.  PCA estimates
-\[
+The fixed-maturity yield panel is the Gurkaynak--Sack--Wright Treasury curve. The local file
+contains 16,097 observations from 1961-06-14 through 2025-12-26. The actual-bond panel contains
+204,868 bond-date observations from 2022-01-03 through 2025-12-31. Raw workbooks are not
+tracked in Git. The public repository contains the executed notebook, reusable Python functions,
+tests, documentation, figures, and this paper.
+
+The core workbooks are \texttt{gsw\_yields.xlsx} and \texttt{treasury\_panel\_pca.xlsx}. The first
+file supports fixed-maturity PCA and strategy research. The second supports the implementation
+check that maps target maturities to nearby Treasury securities. Optional public FRED data can
+be downloaded by the repo script for credit, stress, and curve-regime context, but downloaded
+CSV files remain under \texttt{data/raw/} and outside version control.
+
+\section{Empirical Framework}
+
+\subsection{PCA on Yield Changes}
+
+Let $\Delta y_t$ denote the vector of daily Treasury yield changes across maturities. The baseline
+PCA is
+\begin{equation}
     \Delta y_t = L f_t + \epsilon_t,
+\end{equation}
+where the columns of $L$ are factor loadings and $f_t$ are daily factor shocks. The notebook
+compares two variants. Correlation PCA standardizes each maturity and is useful for interpretation.
+Covariance PCA keeps yield-basis-point units and is more natural for hedge construction because
+one basis point at each maturity remains one basis point.
+
+The paper uses yield changes instead of yield levels. Yield levels are highly persistent and can make
+PCA describe slow-moving curve location rather than tradable risk shocks. The purpose of the
+factor model is to hedge daily curve-risk exposure, so the shock object is the appropriate input.
+
+\subsection{Exact Butterfly Construction}
+
+The exact 2s5s10s butterfly uses covariance PCA loadings. It solves for weights
+\[
+    w=(w_2,w_5,w_{10})
 \]
-where the columns of $L$ are factor loadings.
+such that
+\begin{equation}
+    w^\top L_1 = 0, \qquad
+    w^\top L_2 = 0, \qquad
+    w_5 = -1.
+\end{equation}
+The final condition normalizes the trade as short the 5Y belly. The spread is
+\begin{equation}
+    s_t = w_2 y_{2,t} + w_5 y_{5,t} + w_{10} y_{10,t}.
+\end{equation}
+The trading signal is a lagged rolling z-score,
+\begin{equation}
+    z_t = \frac{s_t-\mu_{t-1}^{(126)}}{\sigma_{t-1}^{(126)}}.
+\end{equation}
+The lag matters because a z-score that uses today's close to form today's position leaks
+information from the P\&L interval into the signal.
 
-The notebook compares two variants.
-\begin{itemize}
-    \item Correlation PCA standardizes each maturity.  It is good for interpreting the shape of level, slope, and curvature factors.
-    \item Covariance PCA keeps yield-bp units.  It is more natural for hedge construction because a one-bp move at one maturity is not normalized away.
-\end{itemize}
+\subsection{Regularized Hedge Construction}
 
-Both versions show the usual Treasury factor structure.
+Exact rolling neutrality can be fragile. When the factor loadings shift, the solution that sets PC1
+and PC2 exposure exactly to zero can require large offsetting wing weights. The upgraded
+specification therefore solves a regularized problem that keeps the 5Y belly weight fixed at $-1$,
+penalizes residual level and slope exposure, and penalizes gross notional. In words, the strategy
+accepts small residual factor exposure in exchange for more stable hedge ratios.
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.92\textwidth]{figures/treasury_pca_loadings.pdf}
-\caption{Covariance PCA loadings estimated from daily Treasury yield changes.  The first three components line up with level, slope, and curvature, which motivates the 2s5s10s butterfly construction.}
-\end{figure}
+This tradeoff is not a modeling detail. It is a trading decision. A hedge that is exactly neutral but
+requires unstable gross exposure can be worse than a hedge that is slightly imperfect but
+implementable and robust.
+
+\subsection{Strategy Hypotheses}
+
+The paper tests two strategy hypotheses. The first is mean reversion: if the factor residual is rich
+or cheap, fade it after robust z-score, carry/rolldown, volatility-targeting, and cost filters. The
+second is carry-aligned momentum: if curvature has been trending and rolldown points in the
+same direction, follow the move rather than fight it.
+
+This hierarchy is important. A relative-value project should not assume that residuals mean-revert
+because a chart looks stationary. It should test the residual, reject the mean-reversion thesis if the
+data do not support it, and then move to a better economic hypothesis.
+
+\section{Results}
+
+\subsection{Treasury Factor Structure}
+
+Both PCA variants recover the standard Treasury factor structure. The first three components
+explain almost all daily yield-change variation:
 
 \begin{center}
 \begin{tabular}{lrr}
@@ -57,17 +184,26 @@ PC3 & 2.32\% & 2.28\% \\
 \end{tabular}
 \end{center}
 
-\section{Butterfly construction}
-The butterfly uses covariance PCA loadings and solves for weights $w=(w_2,w_5,w_{10})$ such that
-\[
-    w'L_1 = 0, \qquad w'L_2 = 0, \qquad w_5=-1.
-\]
-The final condition normalizes the trade as short the 5Y belly.  The static full-sample weights are:
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/treasury_pca_loadings.pdf}
+\caption{Covariance PCA loadings estimated from daily Treasury yield changes. The first three
+components line up with level, slope, and curvature, which motivates the 2s5s10s butterfly
+construction.}
+\label{fig:pca_loadings}
+\end{figure}
+
+This result validates the factor setup. It does not validate the trade. The next step is to ask whether
+the residual spread has properties a trader can use.
+
+\subsection{Exact Butterfly and Stationarity}
+
+The full-sample exact PCA-neutral weights are:
 
 \begin{center}
 \begin{tabular}{lr}
 \toprule
-Maturity & Weight \\
+Maturity & Exact weight \\
 \midrule
 2Y & 0.5777 \\
 5Y & -1.0000 \\
@@ -76,29 +212,20 @@ Maturity & Weight \\
 \end{tabular}
 \end{center}
 
-The resulting factor exposures are exactly neutral to PC1 and PC2 up to numerical precision, while retaining PC3 exposure of 0.3963.  This is the intended curvature residual.
+These weights neutralize PC1 and PC2 up to numerical precision while retaining PC3 exposure of
+0.3963. The construction therefore works mechanically: it produces a curvature residual.
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.82\textwidth]{figures/treasury_weight_comparison.pdf}
-\caption{Exact PC-neutral weights versus regularized weights.  The regularized hedge sacrifices exact neutrality to reduce gross exposure and stabilize the trade for walk-forward use.}
-\end{figure}
+The stationarity evidence is weaker. The ADF statistic is -2.316 with a p-value of 0.1669, and the
+estimated half-life is about 1,222 trading days. A static lagged-z-score backtest earns 303 bp total
+with annualized Sharpe 0.20, max drawdown -158 bp, 10,736 active days, and 617 trades. The
+signal is not useless, but the evidence is not strong enough to support an aggressive
+mean-reversion claim.
 
-\section{Signal and stationarity diagnostics}
-The butterfly spread is
-\[
-    s_t = w_2 y_{2,t} + w_5 y_{5,t} + w_{10} y_{10,t}.
-\]
-A stationary spread would be more plausible for mean reversion.  The diagnostics are deliberately sobering: the ADF statistic is -2.316 with a p-value of 0.1669, and the estimated half-life is about 1,222 trading days.  That does not support an aggressive high-turnover mean-reversion story.
+\subsection{Walk-Forward Instability}
 
-The signal is a lagged rolling z-score,
-\[
-    z_t = \frac{s_t - \mu_{t-1}^{(126)}}{\sigma_{t-1}^{(126)}}.
-\]
-The lag matters: it prevents using today's close in both the signal and the P\&L.  The static backtest earns 303 bp total with an annualized Sharpe of 0.20, max drawdown of -158 bp, 10,736 active days, and 617 trades.  This is weak but informative: factor-neutrality alone is not alpha.
-
-\section{Walk-forward PCA}
-A full-sample PCA backtest uses future information.  The notebook therefore re-estimates PCA weights monthly using only the prior three years of yield changes.  Windows without complete 2Y, 5Y, and 10Y history are skipped.
+A full-sample PCA backtest uses future information. The notebook therefore re-estimates PCA
+weights monthly using only the prior three years of yield changes. This repair exposes a different
+problem: exact rolling weights can become unstable. The exact rolling-weight distribution is:
 
 \begin{center}
 \begin{tabular}{lrrrr}
@@ -112,10 +239,14 @@ Maturity & Mean weight & Std & Min & Max \\
 \end{tabular}
 \end{center}
 
-The wide rolling-weight range is itself an important finding.  It shows that local PCA hedge ratios can become unstable, especially when the curve regime changes.  The walk-forward backtest has 989 bp total P\&L but only a 0.023 annualized Sharpe and a -3,852 bp max drawdown.  The total P\&L is not the right headline; the drawdown and instability are.
+The wide range is itself an empirical result. It shows that local PCA loadings can shift enough to
+make exact neutrality expensive. The walk-forward exact backtest earns 989 bp total P\&L, but
+the annualized Sharpe is only 0.023 and max drawdown is -3,852 bp. Total P\&L is therefore the
+wrong headline. The headline is instability.
 
-\section{Strategy extension}
-The upgraded notebook treats that instability as a research problem rather than a nuisance.  Exact PC neutrality is replaced with a regularized hedge solver that keeps the 5Y belly weight fixed at -1, penalizes residual PC1/PC2 exposure, and caps gross notional.  On the full sample, the regularized weights are:
+\subsection{Regularized Hedge Weights}
+
+The regularized full-sample hedge is less pure but more stable:
 
 \begin{center}
 \begin{tabular}{lr}
@@ -129,33 +260,161 @@ Maturity & Regularized weight \\
 \end{tabular}
 \end{center}
 
-The gross weight falls from 2.08 to 1.65.  The price is that PC1 and PC2 exposures are no longer exactly zero, but the hedge is materially more stable.  A monthly walk-forward version has average weights of 0.3993, -1.0000, and 0.2363 for the 2Y, 5Y, and 10Y legs, with gross exposure averaging 1.64 and never exceeding 1.86 in the tested sample.
+Gross exposure falls from 2.08 to 1.65. Residual factor exposures are no longer exactly zero
+(PC1 -0.1111, PC2 0.0314, PC3 0.3694), but the hedge becomes more implementable. A monthly
+walk-forward version has average weights of 0.3993, -1.0000, and 0.2363 for the 2Y, 5Y, and 10Y
+legs. Gross exposure averages 1.64 and never exceeds 1.86 in the tested sample.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{figures/treasury_weight_comparison.pdf}
+\caption{Exact PC-neutral weights versus regularized weights. The regularized hedge sacrifices
+exact neutrality to reduce gross exposure and stabilize the trade for walk-forward use.}
+\label{fig:weight_comparison}
+\end{figure}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.92\textwidth]{figures/treasury_rolling_regularized_weights.pdf}
-\caption{Walk-forward regularized weights and residual PC exposures.  The regularized construction prevents the explosive wing weights that appeared in the exact rolling PCA hedge.}
+\caption{Walk-forward regularized weights and residual PC exposures. The regularized construction
+prevents the explosive wing weights that appeared in the exact rolling PCA hedge.}
+\label{fig:rolling_weights}
 \end{figure}
 
-The first enhanced strategy keeps the original mean-reversion thesis but adds robust z-scores, carry/rolldown gating, volatility-targeted sizing, and transaction costs.  This stricter version loses money: total P\&L is -372.69 bp, annualized Sharpe is -0.36, and max drawdown is -454.19 bp.  The rolling regularized version also loses money.  That is an important result: the cleaned-up empirical evidence rejects the simple ``curvature is mean-reverting'' strategy.
+\subsection{Strategy Comparison}
 
-The notebook then tests a different hypothesis: curvature may trend when the curve's own rolldown points in the same direction.  A 63-day carry-aligned momentum rule earns 307.47 bp total, with a 0.18 annualized Sharpe and a -125.14 bp max drawdown.  This is not production alpha, but it is more researchable than the naive mean-reversion rule because it respects the observed non-stationarity and the economic carry of the curve.
+The enhanced mean-reversion strategy adds robust z-scores, carry/rolldown gating,
+volatility-targeted sizing, and transaction costs. This stricter version loses money:
+
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+Strategy hypothesis & Total P\&L bp & Annualized Sharpe & Max drawdown bp \\
+\midrule
+Regularized mean reversion & -372.69 & -0.36 & -454.19 \\
+Rolling regularized mean reversion & -449.28 & -0.50 & -493.25 \\
+63-day carry-aligned momentum & 307.47 & 0.18 & -125.14 \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.92\textwidth]{figures/treasury_strategy_comparison.pdf}
-\caption{Regularized curvature spread and competing strategy hypotheses.  Mean reversion weakens after costs and carry gating, while carry-aligned momentum is the more plausible next research branch.}
+\caption{Regularized curvature spread and competing strategy hypotheses. Mean reversion weakens
+after costs and carry gating, while carry-aligned momentum is the more plausible next research
+branch.}
+\label{fig:strategy_comparison}
 \end{figure}
 
-\section{Implementation gap}
-Fixed-maturity yield curves are clean research objects.  Actual trades require securities.  The notebook maps monthly rebalances to nearest available Treasury bonds around the 2Y, 5Y, and 10Y targets, then compares bond yield changes against GSW fixed-maturity changes.  This section is included because it is where many classroom relative-value projects become unrealistic.  Duration, bond selection, roll-down, accrued interest, and liquidity all matter.
+The table changes the story. It would be easy to present the exact PCA butterfly as a
+mean-reverting residual and stop there. The stricter evidence says the opposite: factor neutrality
+is not alpha, and a residual that looks clean may still lose after implementation-aware filters. The
+more researchable branch is carry-aware curvature momentum, because it aligns the signal with
+the curve's own rolldown rather than mechanically fading persistence.
 
-The implementation analysis is not meant to produce a final executable trading book.  It is meant to show the next level of research maturity: after a signal survives the clean model, check whether the instrument layer preserves or destroys it.
+\section{Implementation Gap}
 
-\section{How to read the repo}
-Start with this paper for the intuition, then read \texttt{Treasury\_PCA\_Butterfly\_Relative\_Value.ipynb} for the executed analysis.  The reusable implementation lives in \texttt{src/treasury\_pca\_butterfly.py}, and the validation tests live in \texttt{tests/test\_treasury\_pca\_butterfly.py}.
+Fixed-maturity yields are clean research objects. Trades are done in securities, futures, swaps, or
+packages. The notebook therefore maps monthly rebalances to nearby Treasury bonds around the
+2Y, 5Y, and 10Y targets and compares bond yield changes against GSW fixed-maturity changes.
+This section is included because it is where many relative-value projects become unrealistic.
+Duration, bond selection, accrued interest, repo, financing, bid/ask, roll, and liquidity all matter.
 
-\section{Bottom line}
-The value of this project is not an overstated claim that a simple butterfly z-score is production alpha.  The value is the research process: use PCA to isolate a curvature residual, avoid lookahead, diagnose stationarity, measure regime fragility, and bridge the fixed-maturity signal to tradable bonds.  The upgraded evidence says to reject naive mean reversion, keep regularized hedge construction, and build the next research iteration around carry-aware curvature momentum and actual-bond execution.
+The current repo is production-grade as a research artifact, not as a live trading system. It shows
+the full path from factor construction to strategy rejection and hypothesis refinement. A production
+version would need futures or cash-bond execution, duration and DV01 sizing, financing costs,
+roll mechanics, CTD or benchmark selection, and a portfolio-level risk model. Those are not
+cosmetic additions. They decide whether the fixed-maturity research signal survives contact with
+the instrument layer.
+
+\section{Conclusion}
+
+This paper builds a PCA-neutral Treasury butterfly and asks whether the curvature residual is a
+tradable relative-value signal. The evidence supports a disciplined answer. The factor model works:
+Treasury yield changes are dominated by level, slope, and curvature, and exact 2s5s10s weights
+can neutralize the first two components. The trade thesis is weaker: the static spread is not strongly
+stationary, exact rolling hedge ratios are unstable, and the enhanced mean-reversion strategy loses
+money after costs.
+
+The project becomes more interesting after that rejection. Regularized hedge construction produces
+stable weights, and carry-aligned momentum is a more plausible research branch than naive
+mean reversion. That conclusion is more valuable for recruiting than an overstated Sharpe. It
+shows that the research process is allowed to reject the first idea, preserve the useful machinery,
+and define the next empirical path.
+
+\appendix
+\section{Claim-by-Claim Methodology Audit}
+
+\begin{center}
+\small
+\begin{tabular}{L{0.24\textwidth}L{0.31\textwidth}L{0.34\textwidth}}
+\toprule
+Claim & Implemented evidence & Allowed interpretation \\
+\midrule
+PCA recovers Treasury curve factors &
+Correlation and covariance PCA on daily yield changes; first three factors explain about 99\%
+of variation. &
+The factor framework is appropriate for curve-risk decomposition. \\
+\addlinespace
+Exact butterfly isolates curvature &
+2s5s10s weights neutralize PC1 and PC2 while retaining PC3 exposure. &
+The construction creates a curvature residual; it does not prove alpha. \\
+\addlinespace
+Naive mean reversion is weak &
+ADF p-value 0.1669, half-life about 1,222 days, and enhanced mean-reversion backtests lose
+after costs. &
+The cleaned-up evidence rejects an aggressive z-score mean-reversion story. \\
+\addlinespace
+Regularization improves implementation quality &
+Gross exposure falls from 2.08 to 1.65 and rolling regularized gross exposure stays below 1.86. &
+Small residual factor exposure is a reasonable price for more stable hedge ratios. \\
+\addlinespace
+Carry-aware momentum is the next branch &
+63-day carry-aligned momentum earns 307.47 bp with max drawdown -125.14 bp. &
+The result is researchable but not production alpha. \\
+\addlinespace
+The public repo is safe to share &
+Raw workbooks and downloaded public data are ignored; tests and data documentation state the
+contract. &
+Recruiters can review methodology and code without private data or secrets being published. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{How to Read the Repository}
+
+Start with this paper for the research object and claim hierarchy. Then read
+\path{Treasury_PCA_Butterfly_Relative_Value.ipynb} for the executed analysis. The reusable
+implementation is in \path{src/treasury_pca_butterfly.py}; tests are in
+\path{tests/test_treasury_pca_butterfly.py}; the data contract is in \path{data/README.md};
+and the local knowledge-base protocol is in \path{docs/knowledge_base_protocol.md}.
+
+\begin{thebibliography}{9}
+
+\bibitem{littermanscheinkman1991}
+Litterman, R. and Scheinkman, J. (1991).
+Common factors affecting bond returns.
+\textit{Journal of Fixed Income}, 1(1):54--61.
+
+\bibitem{cochranepiazzesi2005}
+Cochrane, J. H. and Piazzesi, M. (2005).
+Bond risk premia.
+\textit{American Economic Review}, 95(1):138--160.
+
+\bibitem{duartelongstaffyu2007}
+Duarte, J., Longstaff, F. A., and Yu, F. (2007).
+Risk and return in fixed-income arbitrage: Nickels in front of a steamroller?
+\textit{Review of Financial Studies}, 20(3):769--811.
+
+\bibitem{neweywest1987}
+Newey, W. K. and West, K. D. (1987).
+A simple, positive semi-definite, heteroskedasticity and autocorrelation consistent covariance
+matrix.
+\textit{Econometrica}, 55(3):703--708.
+
+\end{thebibliography}
 
 \end{document}
