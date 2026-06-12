@@ -1,7 +1,8 @@
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
-\usepackage{amsmath,booktabs,hyperref}
+\usepackage{amsmath,booktabs,graphicx,hyperref}
 \usepackage{array}
+\usepackage{float}
 \hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
 
 \title{Treasury PCA Butterfly and Relative Value: From Factor Residual to Implementable Trade}
@@ -38,6 +39,12 @@ The notebook compares two variants.
 
 Both versions show the usual Treasury factor structure.
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/treasury_pca_loadings.pdf}
+\caption{Covariance PCA loadings estimated from daily Treasury yield changes.  The first three components line up with level, slope, and curvature, which motivates the 2s5s10s butterfly construction.}
+\end{figure}
+
 \begin{center}
 \begin{tabular}{lrr}
 \toprule
@@ -70,6 +77,12 @@ Maturity & Weight \\
 \end{center}
 
 The resulting factor exposures are exactly neutral to PC1 and PC2 up to numerical precision, while retaining PC3 exposure of 0.3963.  This is the intended curvature residual.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{figures/treasury_weight_comparison.pdf}
+\caption{Exact PC-neutral weights versus regularized weights.  The regularized hedge sacrifices exact neutrality to reduce gross exposure and stabilize the trade for walk-forward use.}
+\end{figure}
 
 \section{Signal and stationarity diagnostics}
 The butterfly spread is
@@ -118,9 +131,21 @@ Maturity & Regularized weight \\
 
 The gross weight falls from 2.08 to 1.65.  The price is that PC1 and PC2 exposures are no longer exactly zero, but the hedge is materially more stable.  A monthly walk-forward version has average weights of 0.3993, -1.0000, and 0.2363 for the 2Y, 5Y, and 10Y legs, with gross exposure averaging 1.64 and never exceeding 1.86 in the tested sample.
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/treasury_rolling_regularized_weights.pdf}
+\caption{Walk-forward regularized weights and residual PC exposures.  The regularized construction prevents the explosive wing weights that appeared in the exact rolling PCA hedge.}
+\end{figure}
+
 The first enhanced strategy keeps the original mean-reversion thesis but adds robust z-scores, carry/rolldown gating, volatility-targeted sizing, and transaction costs.  This stricter version loses money: total P\&L is -372.69 bp, annualized Sharpe is -0.36, and max drawdown is -454.19 bp.  The rolling regularized version also loses money.  That is an important result: the cleaned-up empirical evidence rejects the simple ``curvature is mean-reverting'' strategy.
 
 The notebook then tests a different hypothesis: curvature may trend when the curve's own rolldown points in the same direction.  A 63-day carry-aligned momentum rule earns 307.47 bp total, with a 0.18 annualized Sharpe and a -125.14 bp max drawdown.  This is not production alpha, but it is more researchable than the naive mean-reversion rule because it respects the observed non-stationarity and the economic carry of the curve.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/treasury_strategy_comparison.pdf}
+\caption{Regularized curvature spread and competing strategy hypotheses.  Mean reversion weakens after costs and carry gating, while carry-aligned momentum is the more plausible next research branch.}
+\end{figure}
 
 \section{Implementation gap}
 Fixed-maturity yield curves are clean research objects.  Actual trades require securities.  The notebook maps monthly rebalances to nearest available Treasury bonds around the 2Y, 5Y, and 10Y targets, then compares bond yield changes against GSW fixed-maturity changes.  This section is included because it is where many classroom relative-value projects become unrealistic.  Duration, bond selection, roll-down, accrued interest, and liquidity all matter.

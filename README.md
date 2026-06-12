@@ -11,6 +11,7 @@ volatility-targeted sizing, transaction costs, and parameter-robustness checks.
 - `Treasury_PCA_Butterfly_Relative_Value.ipynb`: presentation-ready research
   notebook.
 - `paper/Treasury_PCA_Butterfly_Relative_Value_Mini_Paper.pdf`: short mini-paper for first-pass reading.
+- `paper/figures/`: vector figures used in the mini-paper.
 - `src/treasury_pca_butterfly.py`: reusable PCA, butterfly, backtest, and bond
   implementation/strategy utilities.
 - `scripts/fetch_fred_series.py`: optional public-data downloader for market
