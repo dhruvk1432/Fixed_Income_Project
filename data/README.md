@@ -7,3 +7,6 @@ Expected local files:
 
 These workbooks are intentionally ignored by git. Keep raw vendor/course data
 local and commit only code, notebooks, documentation, and aggregate diagnostics.
+
+Optional public FRED context downloaded by `scripts/fetch_fred_series.py` is
+written to `data/raw/fred/`.  That directory is also ignored by git.

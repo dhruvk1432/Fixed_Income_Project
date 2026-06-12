@@ -101,6 +101,27 @@ Maturity & Mean weight & Std & Min & Max \\
 
 The wide rolling-weight range is itself an important finding.  It shows that local PCA hedge ratios can become unstable, especially when the curve regime changes.  The walk-forward backtest has 989 bp total P\&L but only a 0.023 annualized Sharpe and a -3,852 bp max drawdown.  The total P\&L is not the right headline; the drawdown and instability are.
 
+\section{Strategy extension}
+The upgraded notebook treats that instability as a research problem rather than a nuisance.  Exact PC neutrality is replaced with a regularized hedge solver that keeps the 5Y belly weight fixed at -1, penalizes residual PC1/PC2 exposure, and caps gross notional.  On the full sample, the regularized weights are:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Maturity & Regularized weight \\
+\midrule
+2Y & 0.4047 \\
+5Y & -1.0000 \\
+10Y & 0.2407 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The gross weight falls from 2.08 to 1.65.  The price is that PC1 and PC2 exposures are no longer exactly zero, but the hedge is materially more stable.  A monthly walk-forward version has average weights of 0.3993, -1.0000, and 0.2363 for the 2Y, 5Y, and 10Y legs, with gross exposure averaging 1.64 and never exceeding 1.86 in the tested sample.
+
+The first enhanced strategy keeps the original mean-reversion thesis but adds robust z-scores, carry/rolldown gating, volatility-targeted sizing, and transaction costs.  This stricter version loses money: total P\&L is -372.69 bp, annualized Sharpe is -0.36, and max drawdown is -454.19 bp.  The rolling regularized version also loses money.  That is an important result: the cleaned-up empirical evidence rejects the simple ``curvature is mean-reverting'' strategy.
+
+The notebook then tests a different hypothesis: curvature may trend when the curve's own rolldown points in the same direction.  A 63-day carry-aligned momentum rule earns 307.47 bp total, with a 0.18 annualized Sharpe and a -125.14 bp max drawdown.  This is not production alpha, but it is more researchable than the naive mean-reversion rule because it respects the observed non-stationarity and the economic carry of the curve.
+
 \section{Implementation gap}
 Fixed-maturity yield curves are clean research objects.  Actual trades require securities.  The notebook maps monthly rebalances to nearest available Treasury bonds around the 2Y, 5Y, and 10Y targets, then compares bond yield changes against GSW fixed-maturity changes.  This section is included because it is where many classroom relative-value projects become unrealistic.  Duration, bond selection, roll-down, accrued interest, and liquidity all matter.
 
@@ -110,6 +131,6 @@ The implementation analysis is not meant to produce a final executable trading b
 Start with this paper for the intuition, then read \texttt{Treasury\_PCA\_Butterfly\_Relative\_Value.ipynb} for the executed analysis.  The reusable implementation lives in \texttt{src/treasury\_pca\_butterfly.py}, and the validation tests live in \texttt{tests/test\_treasury\_pca\_butterfly.py}.
 
 \section{Bottom line}
-The value of this project is not an overstated claim that a simple butterfly z-score is production alpha.  The value is the research process: use PCA to isolate a curvature residual, avoid lookahead, diagnose stationarity, measure regime fragility, and bridge the fixed-maturity signal to tradable bonds.  That is the workflow a rates relative-value researcher needs.
+The value of this project is not an overstated claim that a simple butterfly z-score is production alpha.  The value is the research process: use PCA to isolate a curvature residual, avoid lookahead, diagnose stationarity, measure regime fragility, and bridge the fixed-maturity signal to tradable bonds.  The upgraded evidence says to reject naive mean reversion, keep regularized hedge construction, and build the next research iteration around carry-aware curvature momentum and actual-bond execution.
 
 \end{document}

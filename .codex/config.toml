@@ -1,0 +1,4 @@
+[mcp_servers.options_notebook]
+command = "python3"
+args = ["../Options_Portfolio_Model/tools/notebook_mcp/server.py", "--config", "../Options_Portfolio_Model/.codex/notebook_sources.json"]
+startup_timeout_sec = 20
