@@ -13,7 +13,10 @@ spread is not strongly stationary, exact rolling hedge ratios become unstable,
 and the stricter mean-reversion strategy loses money after implementation-aware
 filters. The stronger research contribution is the pivot: regularized hedge
 construction stabilizes the portfolio, and carry-aligned curvature momentum is a
-more plausible empirical branch to build on.
+more plausible empirical branch to build on. The robustness layer keeps that
+claim honest: purged CPCV, nested blocked selection, residual block bootstrap,
+and full-curve covariance Monte Carlo support continued research but do not
+promote the strategy to production alpha.
 
 ## What is in the repo
 
@@ -47,7 +50,10 @@ The repo is written to make the strength of each claim clear:
 4. **Improved research branch:** regularized hedge construction prevents
    unstable wing weights, and carry-aligned momentum is more plausible than
    naive z-score fading.
-5. **Not yet claimed:** executable cash-bond or futures alpha. A production
+5. **Anti-overfit evidence:** CPCV and Monte Carlo checks reject the tuned
+   mean-reversion story and leave carry-aligned momentum as a candidate branch,
+   not a proven edge.
+6. **Not yet claimed:** executable cash-bond or futures alpha. A production
    version needs DV01 sizing, financing, bid/ask, roll mechanics, benchmark or
    CTD selection, and portfolio-level risk controls.
 
@@ -67,6 +73,9 @@ The repo is written to make the strength of each claim clear:
 8. Stress the signal across lookbacks, entry thresholds, and transaction costs.
 9. Map fixed-maturity targets to actual Treasury bonds to quantify the
    implementation gap.
+10. Validate strategy families with purged/embargoed CPCV, nested blocked
+    model selection, factor-residual block bootstrap, and full-curve covariance
+    Monte Carlo.
 
 ## Data
 

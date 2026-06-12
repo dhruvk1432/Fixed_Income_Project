@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 from typing import Iterable
 
@@ -30,6 +31,93 @@ class RelativeValueConfig:
     target_daily_vol_bp: float = 2.50
     max_abs_position: float = 1.50
     carry_tolerance_bp: float = 0.05
+
+
+@dataclass(frozen=True)
+class PurgedSplitConfig:
+    """Configuration for leakage-aware time-series strategy validation."""
+
+    n_groups: int = 8
+    n_test_groups: int = 2
+    label_horizon: int = 42
+    embargo: int = 5
+
+
+def _contiguous_blocks(n_obs: int, n_groups: int) -> list[np.ndarray]:
+    if n_obs <= 0:
+        raise ValueError("n_obs must be positive.")
+    if n_groups < 2:
+        raise ValueError("n_groups must be at least 2.")
+    if n_groups > n_obs:
+        raise ValueError("n_groups cannot exceed the number of observations.")
+    return [block.astype(int) for block in np.array_split(np.arange(n_obs), n_groups) if len(block)]
+
+
+def _purged_train_indices(
+    n_obs: int,
+    test_indices: np.ndarray,
+    label_horizon: int,
+    embargo: int,
+) -> np.ndarray:
+    """Return train rows whose holding windows do not overlap test rows."""
+
+    if label_horizon < 0 or embargo < 0:
+        raise ValueError("label_horizon and embargo must be non-negative.")
+    test_indices = np.asarray(test_indices, dtype=int)
+    if len(test_indices) == 0:
+        raise ValueError("test_indices cannot be empty.")
+
+    starts = np.arange(n_obs)
+    ends = starts + int(label_horizon)
+    keep = np.ones(n_obs, dtype=bool)
+    keep[test_indices] = False
+
+    split_points = np.where(np.diff(test_indices) > 1)[0] + 1
+    for block in np.split(test_indices, split_points):
+        block_start = max(0, int(block.min()) - int(embargo))
+        block_end = min(n_obs - 1, int(block.max()) + int(embargo))
+        overlaps = (starts <= block_end) & (ends >= block_start)
+        keep &= ~overlaps
+    return np.flatnonzero(keep)
+
+
+def purged_blocked_splits(
+    index: Iterable[object],
+    n_splits: int = 5,
+    label_horizon: int = 42,
+    embargo: int = 5,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Create chronological blocked folds with max-hold purge and embargo."""
+
+    n_obs = len(pd.Index(index))
+    blocks = _contiguous_blocks(n_obs, n_splits)
+    splits = []
+    for test in blocks:
+        train = _purged_train_indices(n_obs, test, label_horizon, embargo)
+        if len(train) and len(test):
+            splits.append((train, test))
+    return splits
+
+
+def combinatorial_purged_splits(
+    index: Iterable[object],
+    config: PurgedSplitConfig | None = None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Create CPCV-style folds from combinations of chronological blocks."""
+
+    cfg = config or PurgedSplitConfig()
+    n_obs = len(pd.Index(index))
+    blocks = _contiguous_blocks(n_obs, cfg.n_groups)
+    if cfg.n_test_groups < 1 or cfg.n_test_groups >= len(blocks):
+        raise ValueError("n_test_groups must be between 1 and n_groups - 1.")
+
+    splits = []
+    for group_ids in combinations(range(len(blocks)), cfg.n_test_groups):
+        test = np.sort(np.concatenate([blocks[i] for i in group_ids])).astype(int)
+        train = _purged_train_indices(n_obs, test, cfg.label_horizon, cfg.embargo)
+        if len(train) and len(test):
+            splits.append((train, test))
+    return splits
 
 
 def _find_file(root: Path, filename: str) -> Path:
@@ -307,6 +395,41 @@ def performance_stats(backtest: pd.DataFrame, pnl_col: str = "net_pnl") -> dict[
     }
 
 
+def performance_stats_subset(
+    backtest: pd.DataFrame,
+    index: Iterable[pd.Timestamp],
+    pnl_col: str = "net_pnl",
+) -> dict[str, float]:
+    """Evaluate full-backtest accounting on a specified validation subset."""
+
+    idx = backtest.index.intersection(pd.Index(index))
+    pnl = backtest.loc[idx, pnl_col].dropna()
+    if pnl.empty:
+        return {
+            "total_pnl_bp": np.nan,
+            "ann_sharpe": np.nan,
+            "max_drawdown_bp": np.nan,
+            "hit_rate_active": np.nan,
+            "active_days": 0,
+            "trades": 0,
+        }
+    active = backtest["position"].shift(1).fillna(0).reindex(pnl.index) != 0
+    cumulative = pnl.cumsum()
+    drawdown = cumulative - cumulative.cummax()
+    pos_change = backtest["position"].diff().abs().fillna(backtest["position"].abs())
+    trades = int((pos_change.reindex(pnl.index).fillna(0.0) > 0).sum())
+    active_pnl = pnl[active.fillna(False)]
+    std = pnl.std()
+    return {
+        "total_pnl_bp": float(pnl.sum()),
+        "ann_sharpe": float(pnl.mean() / std * np.sqrt(252.0)) if std > 0 else np.nan,
+        "max_drawdown_bp": float(drawdown.min()),
+        "hit_rate_active": float((active_pnl > 0).mean()) if len(active_pnl) else np.nan,
+        "active_days": int(active.sum()),
+        "trades": trades,
+    }
+
+
 def monthly_rolling_weights(
     yields_bp: pd.DataFrame,
     window: int = 756,
@@ -419,15 +542,28 @@ def rolldown_spread(
 
     years = horizon_days / 252.0
     if isinstance(weights, pd.Series):
-        maturities = [float(col) for col in weights.index]
-        rolled_maturities = [max(min(yields_bp.columns.astype(float)), m - years) for m in maturities]
-        rows = []
-        for date, row in yields_bp.iterrows():
-            current = row[weights.index].astype(float)
-            rolled = interpolate_curve(row, rolled_maturities)
-            rolled.index = weights.index
-            rows.append((date, float((rolled - current) @ weights.astype(float))))
-        return pd.Series(dict(rows), name="rolldown_spread_bp")
+        curve = yields_bp.copy()
+        sorted_cols = sorted(curve.columns, key=float)
+        x = np.asarray([float(col) for col in sorted_cols], dtype=float)
+        y = curve[sorted_cols].astype(float).to_numpy()
+        target_cols = list(weights.index)
+        target_x = np.asarray([float(col) for col in target_cols], dtype=float)
+        rolled_x = np.maximum(x.min(), target_x - years)
+        rolled_values = []
+        for target in rolled_x:
+            if target <= x[0]:
+                rolled_values.append(y[:, 0])
+            elif target >= x[-1]:
+                rolled_values.append(y[:, -1])
+            else:
+                hi = int(np.searchsorted(x, target, side="right"))
+                lo = hi - 1
+                weight_hi = (target - x[lo]) / (x[hi] - x[lo])
+                rolled_values.append((1.0 - weight_hi) * y[:, lo] + weight_hi * y[:, hi])
+        rolled = np.column_stack(rolled_values)
+        current = curve[target_cols].astype(float).to_numpy()
+        values = (rolled - current) @ weights.astype(float).values
+        return pd.Series(values, index=curve.index, name="rolldown_spread_bp")
 
     weight_cols = [col for col in weights.columns if isinstance(col, (int, np.integer))]
     daily_weights = weights[weight_cols].reindex(yields_bp.index).ffill()
@@ -570,6 +706,272 @@ def strategy_grid(
                     }
                 )
     return pd.DataFrame(rows).sort_values(["ann_sharpe", "total_pnl_bp"], ascending=False)
+
+
+def strategy_family_cpcv_table(
+    spread: pd.Series,
+    carry: pd.Series,
+    mean_reversion_configs: Iterable[RelativeValueConfig],
+    momentum_lookbacks: Iterable[int] = (21, 63, 126),
+    split_config: PurgedSplitConfig | None = None,
+) -> pd.DataFrame:
+    """Evaluate pre-declared RV strategy families on CPCV folds."""
+
+    cfg = split_config or PurgedSplitConfig()
+    base = pd.DataFrame({"spread": spread, "carry": carry}).dropna()
+    splits = combinatorial_purged_splits(base.index, cfg)
+    rows = []
+
+    for config_id, config in enumerate(mean_reversion_configs):
+        zscore = robust_zscore(base["spread"], lookback=config.lookback)
+        bt = enhanced_relative_value_backtest(base["spread"], zscore, carry=base["carry"], config=config)
+        for fold, (train_idx, test_idx) in enumerate(splits):
+            test_dates = base.index[test_idx]
+            stats = performance_stats_subset(bt, test_dates)
+            rows.append(
+                {
+                    "strategy_family": "carry_gated_mean_reversion",
+                    "config_id": config_id,
+                    "lookback": config.lookback,
+                    "entry_z": config.entry_z,
+                    "transaction_cost_bp": config.transaction_cost_bp,
+                    "fold": fold,
+                    "test_n": int(len(test_dates)),
+                    **stats,
+                }
+            )
+
+    for lookback in momentum_lookbacks:
+        bt = curvature_momentum_carry_backtest(base["spread"], base["carry"], momentum_lookback=lookback)
+        for fold, (_, test_idx) in enumerate(splits):
+            test_dates = base.index[test_idx]
+            stats = performance_stats_subset(bt, test_dates)
+            rows.append(
+                {
+                    "strategy_family": "carry_aligned_momentum",
+                    "config_id": int(lookback),
+                    "lookback": int(lookback),
+                    "entry_z": np.nan,
+                    "transaction_cost_bp": 0.03,
+                    "fold": fold,
+                    "test_n": int(len(test_dates)),
+                    **stats,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def summarize_strategy_validation(table: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate CPCV strategy diagnostics without selecting a best path."""
+
+    if table.empty:
+        return pd.DataFrame()
+    grouped = table.groupby(
+        ["strategy_family", "config_id", "lookback", "entry_z", "transaction_cost_bp"],
+        dropna=False,
+    )
+    out = grouped.agg(
+        folds=("fold", "nunique"),
+        mean_test_n=("test_n", "mean"),
+        mean_total_pnl_bp=("total_pnl_bp", "mean"),
+        median_total_pnl_bp=("total_pnl_bp", "median"),
+        positive_fold_rate=("total_pnl_bp", lambda x: float((x > 0).mean())),
+        mean_ann_sharpe=("ann_sharpe", "mean"),
+        worst_drawdown_bp=("max_drawdown_bp", "min"),
+        mean_trades=("trades", "mean"),
+    )
+    return out.sort_values(["mean_ann_sharpe", "mean_total_pnl_bp"], ascending=False)
+
+
+def walk_forward_strategy_selection(
+    spread: pd.Series,
+    carry: pd.Series,
+    configs: Iterable[RelativeValueConfig],
+    split_config: PurgedSplitConfig | None = None,
+    objective: str = "ann_sharpe",
+) -> pd.DataFrame:
+    """Nested blocked validation: select on purged train rows, report test rows."""
+
+    cfg = split_config or PurgedSplitConfig(n_groups=6, n_test_groups=1)
+    base = pd.DataFrame({"spread": spread, "carry": carry}).dropna()
+    splits = purged_blocked_splits(
+        base.index,
+        n_splits=cfg.n_groups,
+        label_horizon=cfg.label_horizon,
+        embargo=cfg.embargo,
+    )
+    rows = []
+    configs = list(configs)
+    for fold, (train_idx, test_idx) in enumerate(splits):
+        train_dates = base.index[train_idx]
+        test_dates = base.index[test_idx]
+        candidates = []
+        for config_id, config in enumerate(configs):
+            zscore = robust_zscore(base["spread"], lookback=config.lookback)
+            bt = enhanced_relative_value_backtest(base["spread"], zscore, carry=base["carry"], config=config)
+            train_stats = performance_stats_subset(bt, train_dates)
+            candidates.append((config_id, config, bt, train_stats))
+        candidates = [
+            item for item in candidates
+            if pd.notna(item[3].get(objective, np.nan))
+        ]
+        if not candidates:
+            continue
+        config_id, config, bt, train_stats = max(candidates, key=lambda item: item[3][objective])
+        test_stats = performance_stats_subset(bt, test_dates)
+        rows.append(
+            {
+                "fold": fold,
+                "selected_config_id": config_id,
+                "selected_lookback": config.lookback,
+                "selected_entry_z": config.entry_z,
+                "train_objective": train_stats[objective],
+                **{f"test_{key}": value for key, value in test_stats.items()},
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _block_resample_pairs(
+    values: np.ndarray,
+    block_size: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if block_size <= 0:
+        raise ValueError("block_size must be positive.")
+    blocks = [values[i : i + block_size] for i in range(0, len(values), block_size)]
+    order = rng.integers(0, len(blocks), size=int(np.ceil(len(values) / block_size)))
+    return np.concatenate([blocks[i] for i in order])[: len(values)]
+
+
+def factor_residual_block_bootstrap_null(
+    spread: pd.Series,
+    carry: pd.Series,
+    strategy: str = "momentum",
+    config: RelativeValueConfig | None = None,
+    momentum_lookback: int = 63,
+    block_size: int = 21,
+    n_sims: int = 500,
+    seed: int = 7,
+) -> pd.DataFrame:
+    """Block-bootstrap spread changes and carry to form a dependent null."""
+
+    base = pd.DataFrame({"spread": spread, "carry": carry}).dropna()
+    if strategy == "momentum":
+        observed_bt = curvature_momentum_carry_backtest(
+            base["spread"], base["carry"], momentum_lookback=momentum_lookback
+        )
+    elif strategy == "mean_reversion":
+        cfg = config or RelativeValueConfig()
+        zscore = robust_zscore(base["spread"], lookback=cfg.lookback)
+        observed_bt = enhanced_relative_value_backtest(base["spread"], zscore, carry=base["carry"], config=cfg)
+    else:
+        raise ValueError("strategy must be 'momentum' or 'mean_reversion'.")
+    observed = performance_stats(observed_bt)
+
+    increments = base["spread"].diff().dropna()
+    paired = pd.DataFrame(
+        {
+            "increment": increments,
+            "carry": base["carry"].reindex(increments.index),
+        }
+    ).dropna()
+    rng = np.random.default_rng(seed)
+    rows = []
+    for sim in range(n_sims):
+        sampled = _block_resample_pairs(paired.values, block_size, rng)
+        sim_index = paired.index[: len(sampled)]
+        sim_spread = pd.Series(
+            base["spread"].iloc[0] + np.cumsum(sampled[:, 0]),
+            index=sim_index,
+            name="sim_spread",
+        )
+        sim_carry = pd.Series(sampled[:, 1], index=sim_index, name="sim_carry")
+        if strategy == "momentum":
+            sim_bt = curvature_momentum_carry_backtest(
+                sim_spread, sim_carry, momentum_lookback=momentum_lookback
+            )
+        else:
+            cfg = config or RelativeValueConfig()
+            sim_zscore = robust_zscore(sim_spread, lookback=cfg.lookback)
+            sim_bt = enhanced_relative_value_backtest(sim_spread, sim_zscore, carry=sim_carry, config=cfg)
+        stats = performance_stats(sim_bt)
+        stats["sim"] = sim
+        rows.append(stats)
+
+    null = pd.DataFrame(rows)
+    null["observed_total_pnl_bp"] = observed["total_pnl_bp"]
+    null["observed_ann_sharpe"] = observed["ann_sharpe"]
+    null["pvalue_total_pnl"] = (null["total_pnl_bp"] >= observed["total_pnl_bp"]).mean()
+    null["pvalue_ann_sharpe"] = (null["ann_sharpe"] >= observed["ann_sharpe"]).mean()
+    return null
+
+
+def covariance_random_walk_strategy_null(
+    yields_bp: pd.DataFrame,
+    weights: pd.Series,
+    strategy: str = "momentum",
+    config: RelativeValueConfig | None = None,
+    momentum_lookback: int = 63,
+    n_sims: int = 250,
+    seed: int = 11,
+) -> pd.DataFrame:
+    """Monte Carlo null preserving yield-change covariance but no alpha signal."""
+
+    columns = sorted(yields_bp.columns, key=float)
+    if not set(weights.index).issubset(set(columns)):
+        raise KeyError("All weight maturities must be present in yields_bp.")
+    levels = yields_bp[columns].ffill().dropna(how="any").astype(float)
+    changes = levels.diff().dropna()
+    cov = changes.cov().values
+    cov = 0.5 * (cov + cov.T)
+    evals, evecs = np.linalg.eigh(cov)
+    cov = (evecs * np.clip(evals, 1e-10, None)) @ evecs.T
+    mean = np.zeros(len(columns))
+    rng = np.random.default_rng(seed)
+
+    observed_spread = compute_spread(levels, weights)
+    observed_carry = rolldown_spread(levels, weights)
+    if strategy == "momentum":
+        observed_bt = curvature_momentum_carry_backtest(
+            observed_spread, observed_carry, momentum_lookback=momentum_lookback
+        )
+    elif strategy == "mean_reversion":
+        cfg = config or RelativeValueConfig()
+        observed_zscore = robust_zscore(observed_spread, lookback=cfg.lookback)
+        observed_bt = enhanced_relative_value_backtest(observed_spread, observed_zscore, carry=observed_carry, config=cfg)
+    else:
+        raise ValueError("strategy must be 'momentum' or 'mean_reversion'.")
+    observed = performance_stats(observed_bt)
+
+    rows = []
+    for sim in range(n_sims):
+        draws = rng.multivariate_normal(mean, cov, size=len(changes))
+        sim_levels = pd.DataFrame(
+            levels.iloc[0].values + np.vstack([np.zeros(len(columns)), np.cumsum(draws, axis=0)]),
+            index=levels.index,
+            columns=columns,
+        )
+        sim_spread = compute_spread(sim_levels, weights)
+        sim_carry = rolldown_spread(sim_levels, weights)
+        if strategy == "momentum":
+            sim_bt = curvature_momentum_carry_backtest(
+                sim_spread, sim_carry, momentum_lookback=momentum_lookback
+            )
+        else:
+            cfg = config or RelativeValueConfig()
+            sim_zscore = robust_zscore(sim_spread, lookback=cfg.lookback)
+            sim_bt = enhanced_relative_value_backtest(sim_spread, sim_zscore, carry=sim_carry, config=cfg)
+        stats = performance_stats(sim_bt)
+        stats["sim"] = sim
+        rows.append(stats)
+
+    null = pd.DataFrame(rows)
+    null["observed_total_pnl_bp"] = observed["total_pnl_bp"]
+    null["observed_ann_sharpe"] = observed["ann_sharpe"]
+    null["pvalue_total_pnl"] = (null["total_pnl_bp"] >= observed["total_pnl_bp"]).mean()
+    null["pvalue_ann_sharpe"] = (null["ann_sharpe"] >= observed["ann_sharpe"]).mean()
+    return null
 
 
 def regime(date: pd.Timestamp) -> str:

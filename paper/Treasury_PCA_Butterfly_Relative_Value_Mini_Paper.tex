@@ -28,9 +28,9 @@ sobering. The exact full-sample butterfly is neutral to level and slope by const
 spread is not strongly stationary, rolling exact hedge ratios become unstable, and a stricter
 mean-reversion strategy loses money after realistic filters. A carry-aligned curvature-momentum
 rule is more researchable: it earns 307.47 bp with a 0.18 annualized Sharpe and a smaller
-drawdown, but it is still not production alpha. The paper's main contribution is therefore the
-research workflow. It shows how to move from a factor residual to a trade candidate without
-confusing factor neutrality with edge.
+drawdown, but purged CPCV, nested blocked selection, and Monte Carlo nulls keep the claim
+modest. The paper's main contribution is therefore the research workflow. It shows how to move
+from a factor residual to a trade candidate without confusing factor neutrality with edge.
 \end{abstract}
 
 \noindent\rule{\textwidth}{0.4pt}
@@ -62,15 +62,16 @@ rejects that story. The ADF test does not strongly reject a unit root in the sta
 estimated half-life is about 1,222 trading days, exact rolling PCA weights can become explosive,
 and the enhanced mean-reversion specification loses 372.69 bp after costs. A carry-aligned
 curvature-momentum rule is more plausible because it respects the spread's observed persistence
-and the curve's own rolldown, but even that rule has only a modest Sharpe. The right conclusion is
-to continue the research around regularized hedge construction, carry-aware signals, and actual
-bond execution, not to present a naive z-score as alpha.
+and the curve's own rolldown, but even that rule has only a modest Sharpe and does not clear a
+high-confidence Monte Carlo threshold. The right conclusion is to continue the research around
+regularized hedge construction, carry-aware signals, and actual bond execution, not to present a
+naive z-score as alpha.
 
 The remainder of the paper is organized as follows. Section 2 places the design in the fixed-income
 factor and relative-value literatures. Section 3 describes the data. Section 4 defines the PCA,
-butterfly, and strategy objects. Section 5 reports the empirical results. Section 6 discusses the
-implementation gap. Section 7 concludes, and Appendix A gives a claim-by-claim audit of what
-the repo proves.
+butterfly, and strategy objects. Section 5 reports the empirical results. Section 6 reports
+robustness and anti-overfit checks. Section 7 discusses the implementation gap. Section 8
+concludes, and Appendix A gives a claim-by-claim audit of what the repo proves.
 
 \section{Related Literature}
 
@@ -315,6 +316,45 @@ is not alpha, and a residual that looks clean may still lose after implementatio
 more researchable branch is carry-aware curvature momentum, because it aligns the signal with
 the curve's own rolldown rather than mechanically fading persistence.
 
+\section{Robustness and Anti-Overfit Controls}
+
+The validation design treats strategy selection as the main overfitting risk. The mean-reversion
+grid contains multiple lookbacks, entry thresholds, and transaction costs. A full-sample ranking
+would be path fitting, so the notebook evaluates pre-declared strategy families on purged and
+embargoed CPCV folds. The purge length is 42 trading days, matching the maximum holding
+period, and an additional five-day embargo is applied around test blocks.
+
+The CPCV evidence reinforces the economic conclusion. Carry-aligned momentum has the top
+average fold results: the 21-day variant has mean total fold P\&L of 81.34 bp, positive P\&L in
+75\% of folds, and mean fold Sharpe of 0.19; the 63-day variant has mean total fold P\&L of
+76.87 bp, positive P\&L in 85.71\% of folds, and mean fold Sharpe of 0.18. The best mean-reversion
+families remain negative even with wider 252-day lookbacks and higher entry thresholds. This is
+the desired behavior of the validation layer: it rejects the original residual-fading story rather than
+searching until it finds a flattering z-score.
+
+A nested blocked selection test makes the rejection sharper. For each chronological fold, the
+mean-reversion grid is selected on purged train rows and then evaluated on the held-out block.
+Five of six test folds lose money, and the aggregate selected mean-reversion evidence remains
+negative. This prevents the repo from claiming that a better-tuned fading rule has been found.
+
+The null simulations are also intentionally conservative. A factor-residual block bootstrap
+resamples spread changes and carry in 21-day blocks. The 63-day carry-aligned momentum rule has
+a one-sided p-value of 0.113 on total P\&L and 0.116 on Sharpe under this null. A second Monte
+Carlo draws full-curve yield changes from a PSD-clipped sample covariance matrix, reconstructs
+simulated yield paths, and recomputes the same spread and rolldown definitions. In that
+full-curve covariance null, the p-values are 0.064 on total P\&L and 0.080 on Sharpe. Those
+numbers are encouraging enough to keep the branch alive, but not strong enough to call it proven
+alpha.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{figures/treasury_robustness_summary.pdf}
+\caption{Robustness evidence for the Treasury RV project. The panels show purged CPCV strategy
+ranking, nested blocked mean-reversion selection, and block/covariance null distributions for the
+carry-aligned momentum branch.}
+\label{fig:treasury_robustness}
+\end{figure}
+
 \section{Implementation Gap}
 
 Fixed-maturity yields are clean research objects. Trades are done in securities, futures, swaps, or
@@ -341,9 +381,10 @@ money after costs.
 
 The project becomes more interesting after that rejection. Regularized hedge construction produces
 stable weights, and carry-aligned momentum is a more plausible research branch than naive
-mean reversion. That conclusion is more valuable for recruiting than an overstated Sharpe. It
-shows that the research process is allowed to reject the first idea, preserve the useful machinery,
-and define the next empirical path.
+mean reversion. The anti-overfit layer strengthens the workflow but keeps the public claim
+honest: momentum is researchable, not validated production alpha. That conclusion is more
+valuable for recruiting than an overstated Sharpe. It shows that the research process is allowed
+to reject the first idea, preserve the useful machinery, and define the next empirical path.
 
 \appendix
 \section{Claim-by-Claim Methodology Audit}
@@ -375,6 +416,12 @@ Small residual factor exposure is a reasonable price for more stable hedge ratio
 Carry-aware momentum is the next branch &
 63-day carry-aligned momentum earns 307.47 bp with max drawdown -125.14 bp. &
 The result is researchable but not production alpha. \\
+\addlinespace
+The result is not selected by path fitting &
+Purged CPCV, nested blocked grid selection, factor-residual block bootstrap, and full-curve
+covariance Monte Carlo are implemented. &
+Mean reversion is rejected; carry-aligned momentum survives as a candidate but not as a proven
+edge. \\
 \addlinespace
 The public repo is safe to share &
 Raw workbooks and downloaded public data are ignored; tests and data documentation state the

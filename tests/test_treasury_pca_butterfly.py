@@ -5,19 +5,26 @@ import pandas as pd
 import pytest
 
 from src.treasury_pca_butterfly import (
+    PurgedSplitConfig,
     RelativeValueConfig,
     backtest_mean_reversion,
+    combinatorial_purged_splits,
     compute_spread,
+    covariance_random_walk_strategy_null,
     curvature_momentum_carry_backtest,
     enhanced_relative_value_backtest,
     factor_exposures,
+    factor_residual_block_bootstrap_null,
     fit_pca,
     load_gsw_yields,
+    performance_stats_subset,
+    purged_blocked_splits,
     rolldown_spread,
     rolling_zscore,
     robust_zscore,
     solve_regularized_butterfly_weights,
     solve_butterfly_weights,
+    strategy_family_cpcv_table,
 )
 
 
@@ -69,6 +76,88 @@ def test_enhanced_relative_value_backtest_has_costs_and_carry_filter():
     assert {"position", "gross_pnl", "cost", "net_pnl", "cum_net_pnl"}.issubset(bt.columns)
     assert {"position", "gross_pnl", "cost", "net_pnl", "cum_net_pnl"}.issubset(momentum_bt.columns)
     assert len(bt) > 100
+
+
+def test_purged_splits_remove_overlapping_holding_windows():
+    index = pd.date_range("2020-01-01", periods=80, freq="B")
+    horizon = 10
+    embargo = 3
+    splits = purged_blocked_splits(index, n_splits=5, label_horizon=horizon, embargo=embargo)
+    assert len(splits) == 5
+    for train_idx, test_idx in splits:
+        assert not set(train_idx).intersection(set(test_idx))
+        for train in train_idx:
+            train_window = set(range(train, min(len(index), train + horizon + 1)))
+            padded_test = set(
+                range(
+                    max(0, int(test_idx.min()) - embargo),
+                    min(len(index), int(test_idx.max()) + embargo + 1),
+                )
+            )
+            assert train_window.isdisjoint(padded_test)
+
+
+def test_cpcv_validation_and_nulls_are_deterministic():
+    dates = pd.date_range("2021-01-01", periods=360, freq="B")
+    curve = pd.DataFrame(
+        {
+            2: 100 + np.sin(np.linspace(0, 15, len(dates))) * 6,
+            5: 125 + np.sin(np.linspace(0, 15, len(dates)) + 0.4) * 5,
+            10: 150 + np.sin(np.linspace(0, 15, len(dates)) + 0.9) * 4,
+        },
+        index=dates,
+    )
+    weights = pd.Series({2: 0.45, 5: -1.0, 10: 0.35})
+    spread = compute_spread(curve, weights)
+    carry = rolldown_spread(curve, weights, horizon_days=21)
+    cfg = PurgedSplitConfig(n_groups=6, n_test_groups=2, label_horizon=12, embargo=2)
+    table = strategy_family_cpcv_table(
+        spread,
+        carry,
+        [RelativeValueConfig(entry_z=1.0, lookback=63, max_hold_days=21)],
+        momentum_lookbacks=(21,),
+        split_config=cfg,
+    )
+    splits = combinatorial_purged_splits(spread.dropna().index, cfg)
+    bt = curvature_momentum_carry_backtest(spread, carry, momentum_lookback=21)
+    subset_stats = performance_stats_subset(bt, spread.index[50:100])
+    null_a = factor_residual_block_bootstrap_null(
+        spread,
+        carry,
+        strategy="momentum",
+        momentum_lookback=21,
+        n_sims=20,
+        seed=5,
+    )
+    null_b = factor_residual_block_bootstrap_null(
+        spread,
+        carry,
+        strategy="momentum",
+        momentum_lookback=21,
+        n_sims=20,
+        seed=5,
+    )
+    mc_a = covariance_random_walk_strategy_null(
+        curve,
+        weights,
+        strategy="momentum",
+        momentum_lookback=21,
+        n_sims=10,
+        seed=3,
+    )
+    mc_b = covariance_random_walk_strategy_null(
+        curve,
+        weights,
+        strategy="momentum",
+        momentum_lookback=21,
+        n_sims=10,
+        seed=3,
+    )
+    assert len(splits) == 15
+    assert {"strategy_family", "fold", "total_pnl_bp", "ann_sharpe"}.issubset(table.columns)
+    assert subset_stats["active_days"] >= 0
+    pd.testing.assert_frame_equal(null_a, null_b)
+    pd.testing.assert_frame_equal(mc_a, mc_b)
 
 
 @pytest.mark.skipif(not _has_data(), reason="local raw data not present")
