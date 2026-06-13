@@ -8,6 +8,7 @@ from src.treasury_pca_butterfly import (
     PurgedSplitConfig,
     RelativeValueConfig,
     backtest_mean_reversion,
+    block_bootstrap_path_summary,
     combinatorial_purged_splits,
     compute_spread,
     covariance_random_walk_strategy_null,
@@ -25,6 +26,7 @@ from src.treasury_pca_butterfly import (
     solve_regularized_butterfly_weights,
     solve_butterfly_weights,
     strategy_family_cpcv_table,
+    student_t_tail_df_mle,
 )
 
 
@@ -153,11 +155,20 @@ def test_cpcv_validation_and_nulls_are_deterministic():
         n_sims=10,
         seed=3,
     )
+    path_a = block_bootstrap_path_summary(bt["net_pnl"], block_size=10, n_boot=20, seed=5)
+    path_b = block_bootstrap_path_summary(bt["net_pnl"], block_size=10, n_boot=20, seed=5)
+    tail_df = student_t_tail_df_mle(curve.diff().dropna()[5])
     assert len(splits) == 15
     assert {"strategy_family", "fold", "total_pnl_bp", "ann_sharpe"}.issubset(table.columns)
     assert subset_stats["active_days"] >= 0
     pd.testing.assert_frame_equal(null_a, null_b)
     pd.testing.assert_frame_equal(mc_a, mc_b)
+    pd.testing.assert_frame_equal(path_a, path_b)
+    assert {"innovation_method", "vol_model", "student_t_df_mle", "egarch_downside", "median_sim_total_pnl_bp"}.issubset(
+        mc_a.columns
+    )
+    assert {"observed_path", "mean_path", "median_path", "lower_path", "upper_path"}.issubset(path_a.columns)
+    assert np.isfinite(tail_df)
 
 
 @pytest.mark.skipif(not _has_data(), reason="local raw data not present")

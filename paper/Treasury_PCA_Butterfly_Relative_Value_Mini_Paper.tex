@@ -28,8 +28,9 @@ sobering. The exact full-sample butterfly is neutral to level and slope by const
 spread is not strongly stationary, rolling exact hedge ratios become unstable, and a stricter
 mean-reversion strategy loses money after realistic filters. A carry-aligned curvature-momentum
 rule is more researchable: it earns 307.47 bp with a 0.18 annualized Sharpe and a smaller
-drawdown, but purged CPCV, nested blocked selection, and Monte Carlo nulls keep the claim
-modest. The paper's main contribution is therefore the research workflow. It shows how to move
+drawdown, but purged CPCV, nested blocked selection, block bootstraps, and empirical
+EGARCH full-curve nulls keep the claim modest. The paper's main contribution is therefore the
+research workflow. It shows how to move
 from a factor residual to a trade candidate without confusing factor neutrality with edge.
 \end{abstract}
 
@@ -338,20 +339,33 @@ Five of six test folds lose money, and the aggregate selected mean-reversion evi
 negative. This prevents the repo from claiming that a better-tuned fading rule has been found.
 
 The null simulations are also intentionally conservative. A factor-residual block bootstrap
-resamples spread changes and carry in 21-day blocks. The 63-day carry-aligned momentum rule has
-a one-sided p-value of 0.113 on total P\&L and 0.116 on Sharpe under this null. A second Monte
-Carlo draws full-curve yield changes from a PSD-clipped sample covariance matrix, reconstructs
-simulated yield paths, and recomputes the same spread and rolldown definitions. In that
-full-curve covariance null, the p-values are 0.064 on total P\&L and 0.080 on Sharpe. Those
-numbers are encouraging enough to keep the branch alive, but not strong enough to call it proven
-alpha.
+resamples spread changes and carry in 21-day blocks rather than imposing a normal distribution.
+The 63-day carry-aligned momentum rule has a one-sided p-value of 0.111 on total P\&L and
+0.114 on Sharpe under this null. The simulated null mean and median total P\&L are 24.57 bp
+and 21.55 bp, while the observed total is 307.47 bp.
+
+A second full-curve Monte Carlo deliberately avoids Gaussian yield shocks. Daily yield changes
+are whitened, empirical heavy-tailed innovation vectors are resampled in blocks, the innovations
+are recolored by the empirical full-curve covariance matrix, and an EGARCH volatility state is
+used to create crisis-style volatility clustering. The first-PC innovation has a Student-t MLE tail
+parameter of about 5.58, which is direct evidence against a thin-tailed normal assumption. The
+EGARCH fit is highly persistent, with beta 0.992, alpha 0.081, and a positive downside-clustering
+term of 0.013. In this empirical EGARCH full-curve null, the p-values are 0.046 on total P\&L and
+0.066 on Sharpe. The null mean and median total P\&L are -5.64 bp and -1.87 bp, and the 5th to
+95th percentile range is -283.83 bp to 259.67 bp. Those numbers are encouraging enough to keep
+the branch alive, but the Sharpe evidence is still only marginal, so the result is not proven alpha.
+
+The path evidence is also reported by median, not just by mean. A block-bootstrap of the observed
+carry-momentum P\&L has a final mean path of 295.90 bp and a final median path of 294.46 bp,
+which means the positive endpoint is not being driven solely by a few extreme simulated paths.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.96\textwidth]{figures/treasury_robustness_summary.pdf}
 \caption{Robustness evidence for the Treasury RV project. The panels show purged CPCV strategy
-ranking, nested blocked mean-reversion selection, and block/covariance null distributions for the
-carry-aligned momentum branch.}
+ranking, nested blocked mean-reversion selection, block and empirical EGARCH null distributions,
+and observed, mean, and median block-bootstrap cumulative P\&L paths for the carry-aligned
+momentum branch.}
 \label{fig:treasury_robustness}
 \end{figure}
 
@@ -418,8 +432,9 @@ Carry-aware momentum is the next branch &
 The result is researchable but not production alpha. \\
 \addlinespace
 The result is not selected by path fitting &
-Purged CPCV, nested blocked grid selection, factor-residual block bootstrap, and full-curve
-covariance Monte Carlo are implemented. &
+Purged CPCV, nested blocked grid selection, factor-residual block bootstrap, empirical full-curve
+innovations, Student-t tail diagnostics, EGARCH volatility clustering, and median path summaries
+are implemented. &
 Mean reversion is rejected; carry-aligned momentum survives as a candidate but not as a proven
 edge. \\
 \addlinespace

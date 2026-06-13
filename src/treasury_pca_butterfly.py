@@ -10,6 +10,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
+from scipy.special import gammaln
 from sklearn.decomposition import PCA
 from statsmodels.tsa.stattools import adfuller
 
@@ -840,8 +842,13 @@ def _block_resample_pairs(
     if block_size <= 0:
         raise ValueError("block_size must be positive.")
     blocks = [values[i : i + block_size] for i in range(0, len(values), block_size)]
-    order = rng.integers(0, len(blocks), size=int(np.ceil(len(values) / block_size)))
-    return np.concatenate([blocks[i] for i in order])[: len(values)]
+    draws = []
+    drawn = 0
+    while drawn < len(values):
+        block = blocks[int(rng.integers(0, len(blocks)))]
+        draws.append(block)
+        drawn += len(block)
+    return np.concatenate(draws)[: len(values)]
 
 
 def factor_residual_block_bootstrap_null(
@@ -904,7 +911,173 @@ def factor_residual_block_bootstrap_null(
     null["observed_ann_sharpe"] = observed["ann_sharpe"]
     null["pvalue_total_pnl"] = (null["total_pnl_bp"] >= observed["total_pnl_bp"]).mean()
     null["pvalue_ann_sharpe"] = (null["ann_sharpe"] >= observed["ann_sharpe"]).mean()
+    null["mean_sim_total_pnl_bp"] = null["total_pnl_bp"].mean()
+    null["median_sim_total_pnl_bp"] = null["total_pnl_bp"].median()
+    null["mean_sim_ann_sharpe"] = null["ann_sharpe"].mean()
+    null["median_sim_ann_sharpe"] = null["ann_sharpe"].median()
     return null
+
+
+def _psd_covariance(
+    matrix: pd.DataFrame,
+    min_eigenvalue: float = 1e-10,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    cov = matrix.cov().values
+    cov = 0.5 * (cov + cov.T)
+    evals, evecs = np.linalg.eigh(cov)
+    order = np.argsort(evals)[::-1]
+    evals = np.clip(evals[order], min_eigenvalue, None)
+    evecs = evecs[:, order]
+    sqrt_cov = (evecs * np.sqrt(evals)) @ evecs.T
+    inv_sqrt_cov = (evecs * (1.0 / np.sqrt(evals))) @ evecs.T
+    return evals, evecs, sqrt_cov, inv_sqrt_cov
+
+
+def _student_t_logpdf_variance_one(values: np.ndarray, df: float) -> np.ndarray:
+    scale = np.sqrt((df - 2.0) / df)
+    standardized = values / scale
+    return (
+        gammaln((df + 1.0) / 2.0)
+        - gammaln(df / 2.0)
+        - 0.5 * np.log(df * np.pi)
+        - np.log(scale)
+        - ((df + 1.0) / 2.0) * np.log1p((standardized * standardized) / df)
+    )
+
+
+def student_t_tail_df_mle(values: pd.Series | np.ndarray, lower: float = 2.05, upper: float = 80.0) -> float:
+    """Estimate a variance-normalized Student-t tail parameter by MLE."""
+
+    clean = np.asarray(pd.Series(values).dropna(), dtype=float)
+    clean = clean[np.isfinite(clean)]
+    if len(clean) < 30 or np.nanstd(clean) <= 0:
+        return np.nan
+    clean = (clean - clean.mean()) / clean.std(ddof=1)
+
+    def objective(df: float) -> float:
+        return -float(np.sum(_student_t_logpdf_variance_one(clean, df)))
+
+    result = minimize_scalar(objective, bounds=(lower, upper), method="bounded", options={"xatol": 1e-3})
+    return float(result.x) if result.success else np.nan
+
+
+def fit_egarch_volatility(values: pd.Series | np.ndarray) -> dict[str, float]:
+    """Fit a small EGARCH(1,1) volatility recursion by Gaussian QMLE.
+
+    The fitted factor is oriented so negative values correspond to Treasury
+    rally shocks in the covariance simulation.  The model is used only to
+    generate clustered volatility states for null paths; it is not used as an
+    alpha forecast.
+    """
+
+    clean = np.asarray(pd.Series(values).dropna(), dtype=float)
+    clean = clean[np.isfinite(clean)]
+    if len(clean) < 60 or np.nanstd(clean) <= 0:
+        return {"omega": 0.0, "alpha": 0.10, "gamma": -0.05, "downside": 0.05, "beta": 0.90, "success": 0.0}
+    clean = (clean - clean.mean()) / clean.std(ddof=1)
+    log_var0 = float(np.log(np.var(clean, ddof=1)))
+
+    def filter_log_variance(params: np.ndarray) -> np.ndarray:
+        omega, alpha, gamma, downside, beta = params
+        log_h = np.empty(len(clean), dtype=float)
+        log_h[0] = log_var0
+        expected_abs_z = np.sqrt(2.0 / np.pi)
+        expected_downside_z = 1.0 / np.sqrt(2.0 * np.pi)
+        for t in range(1, len(clean)):
+            prev_h = float(np.exp(np.clip(log_h[t - 1], -12.0, 12.0)))
+            prev_z = clean[t - 1] / np.sqrt(prev_h)
+            downside_shock = max(-prev_z, 0.0)
+            log_h[t] = (
+                omega
+                + beta * log_h[t - 1]
+                + alpha * (abs(prev_z) - expected_abs_z)
+                + gamma * prev_z
+                + downside * (downside_shock - expected_downside_z)
+            )
+            log_h[t] = float(np.clip(log_h[t], -12.0, 12.0))
+        return log_h
+
+    def objective(params: np.ndarray) -> float:
+        log_h = filter_log_variance(params)
+        return float(0.5 * np.sum(np.log(2.0 * np.pi) + log_h + (clean * clean) / np.exp(log_h)))
+
+    initial = np.array([0.0, 0.10, -0.05, 0.05, 0.90], dtype=float)
+    bounds = [(-2.0, 2.0), (0.0, 1.25), (-1.25, 1.25), (0.0, 1.25), (0.01, 0.995)]
+    result = minimize(objective, initial, method="L-BFGS-B", bounds=bounds)
+    params = result.x if result.success else initial
+    return {
+        "omega": float(params[0]),
+        "alpha": float(params[1]),
+        "gamma": float(params[2]),
+        "downside": float(params[3]),
+        "beta": float(params[4]),
+        "success": float(bool(result.success)),
+    }
+
+
+def _simulate_egarch_scales(innovations: np.ndarray, params: dict[str, float]) -> np.ndarray:
+    innovations = np.asarray(innovations, dtype=float)
+    if len(innovations) == 0:
+        return innovations
+    expected_abs_z = np.sqrt(2.0 / np.pi)
+    omega = params["omega"]
+    alpha = params["alpha"]
+    gamma = params["gamma"]
+    downside = params.get("downside", 0.0)
+    beta = params["beta"]
+    log_h = np.empty(len(innovations), dtype=float)
+    log_h[0] = 0.0
+    expected_downside_z = 1.0 / np.sqrt(2.0 * np.pi)
+    for t in range(1, len(innovations)):
+        prev_z = innovations[t - 1]
+        downside_shock = max(-prev_z, 0.0)
+        log_h[t] = (
+            omega
+            + beta * log_h[t - 1]
+            + alpha * (abs(prev_z) - expected_abs_z)
+            + gamma * prev_z
+            + downside * (downside_shock - expected_downside_z)
+        )
+        log_h[t] = float(np.clip(log_h[t], -12.0, 12.0))
+    scales = np.sqrt(np.exp(log_h))
+    rms = np.sqrt(np.mean(scales * scales))
+    return scales / rms if rms > 0 else np.ones_like(scales)
+
+
+def block_bootstrap_path_summary(
+    pnl: pd.Series,
+    block_size: int = 21,
+    n_boot: int = 1000,
+    seed: int = 7,
+    alpha: float = 0.10,
+) -> pd.DataFrame:
+    """Return observed, mean, median, and tail bootstrap cumulative P&L paths."""
+
+    clean = pnl.dropna().astype(float).values
+    if len(clean) == 0:
+        return pd.DataFrame(columns=["observed_path", "mean_path", "median_path", "lower_path", "upper_path"])
+
+    rng = np.random.default_rng(seed)
+    starts = np.arange(max(1, len(clean) - block_size + 1))
+    paths = np.empty((n_boot, len(clean)), dtype=float)
+    for sim in range(n_boot):
+        draws = []
+        while len(draws) < len(clean):
+            start = int(rng.choice(starts))
+            draws.extend(clean[start : start + block_size])
+        paths[sim] = np.cumsum(np.asarray(draws[: len(clean)], dtype=float))
+
+    lo_q, hi_q = alpha / 2.0, 1.0 - alpha / 2.0
+    return pd.DataFrame(
+        {
+            "observed_path": np.cumsum(clean),
+            "mean_path": paths.mean(axis=0),
+            "median_path": np.median(paths, axis=0),
+            "lower_path": np.quantile(paths, lo_q, axis=0),
+            "upper_path": np.quantile(paths, hi_q, axis=0),
+        },
+        index=np.arange(1, len(clean) + 1),
+    )
 
 
 def covariance_random_walk_strategy_null(
@@ -915,19 +1088,48 @@ def covariance_random_walk_strategy_null(
     momentum_lookback: int = 63,
     n_sims: int = 250,
     seed: int = 11,
+    innovation_method: str = "empirical",
+    vol_model: str = "egarch",
+    block_size: int = 21,
+    student_t_df: float | None = None,
 ) -> pd.DataFrame:
-    """Monte Carlo null preserving yield-change covariance but no alpha signal."""
+    """Full-curve null simulation with fat tails and optional EGARCH clustering.
+
+    The default is semiparametric: historical full-curve innovations are
+    whitened, resampled in blocks, recolored by the empirical covariance, and
+    scaled by an EGARCH volatility state.  This preserves heavy tails and
+    clustered crisis behavior better than a multivariate Gaussian random walk.
+    A variance-normalized Student-t innovation option is available when a fully
+    parametric MLE tail assumption is desired.
+    """
 
     columns = sorted(yields_bp.columns, key=float)
     if not set(weights.index).issubset(set(columns)):
         raise KeyError("All weight maturities must be present in yields_bp.")
+    if innovation_method not in {"empirical", "student_t"}:
+        raise ValueError("innovation_method must be 'empirical' or 'student_t'.")
+    if vol_model not in {"none", "egarch"}:
+        raise ValueError("vol_model must be 'none' or 'egarch'.")
     levels = yields_bp[columns].ffill().dropna(how="any").astype(float)
     changes = levels.diff().dropna()
-    cov = changes.cov().values
-    cov = 0.5 * (cov + cov.T)
-    evals, evecs = np.linalg.eigh(cov)
-    cov = (evecs * np.clip(evals, 1e-10, None)) @ evecs.T
-    mean = np.zeros(len(columns))
+    centered = changes - changes.mean()
+    evals, evecs, sqrt_cov, inv_sqrt_cov = _psd_covariance(centered)
+    pc1 = evecs[:, 0].copy()
+    if np.nanmean(pc1) < 0:
+        pc1 = -pc1
+    factor = pd.Series(centered.values @ pc1 / np.sqrt(evals[0]), index=changes.index, name="pc1_factor")
+    z_history = centered.values @ inv_sqrt_cov
+    t_df = float(student_t_df) if student_t_df is not None else student_t_tail_df_mle(factor)
+    if not np.isfinite(t_df) or t_df <= 2.0:
+        t_df = 8.0
+    egarch_params = fit_egarch_volatility(factor) if vol_model == "egarch" else {
+        "omega": 0.0,
+        "alpha": 0.0,
+        "gamma": 0.0,
+        "beta": 0.0,
+        "downside": 0.0,
+        "success": 1.0,
+    }
     rng = np.random.default_rng(seed)
 
     observed_spread = compute_spread(levels, weights)
@@ -946,7 +1148,17 @@ def covariance_random_walk_strategy_null(
 
     rows = []
     for sim in range(n_sims):
-        draws = rng.multivariate_normal(mean, cov, size=len(changes))
+        if innovation_method == "empirical":
+            innovations = _block_resample_pairs(z_history, block_size, rng)
+        else:
+            innovations = rng.standard_t(t_df, size=(len(changes), len(columns)))
+            innovations *= np.sqrt((t_df - 2.0) / t_df)
+        if vol_model == "egarch":
+            factor_innovations = innovations @ pc1
+            scales = _simulate_egarch_scales(factor_innovations, egarch_params)
+        else:
+            scales = np.ones(len(changes), dtype=float)
+        draws = (innovations * scales[:, None]) @ sqrt_cov.T
         sim_levels = pd.DataFrame(
             levels.iloc[0].values + np.vstack([np.zeros(len(columns)), np.cumsum(draws, axis=0)]),
             index=levels.index,
@@ -971,6 +1183,17 @@ def covariance_random_walk_strategy_null(
     null["observed_ann_sharpe"] = observed["ann_sharpe"]
     null["pvalue_total_pnl"] = (null["total_pnl_bp"] >= observed["total_pnl_bp"]).mean()
     null["pvalue_ann_sharpe"] = (null["ann_sharpe"] >= observed["ann_sharpe"]).mean()
+    null["innovation_method"] = innovation_method
+    null["vol_model"] = vol_model
+    null["student_t_df_mle"] = t_df
+    null["egarch_alpha"] = egarch_params["alpha"]
+    null["egarch_gamma"] = egarch_params["gamma"]
+    null["egarch_downside"] = egarch_params.get("downside", 0.0)
+    null["egarch_beta"] = egarch_params["beta"]
+    null["mean_sim_total_pnl_bp"] = null["total_pnl_bp"].mean()
+    null["median_sim_total_pnl_bp"] = null["total_pnl_bp"].median()
+    null["mean_sim_ann_sharpe"] = null["ann_sharpe"].mean()
+    null["median_sim_ann_sharpe"] = null["ann_sharpe"].median()
     return null
 
 
