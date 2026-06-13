@@ -37,6 +37,23 @@ def _has_data() -> bool:
     return (ROOT / "gsw_yields.xlsx").exists()
 
 
+def _assert_no_holding_overlap(splits, n_obs: int, horizon: int, embargo: int) -> None:
+    for train_idx, test_idx in splits:
+        assert not set(train_idx).intersection(set(test_idx))
+        split_points = np.where(np.diff(test_idx) > 1)[0] + 1
+        test_blocks = np.split(test_idx, split_points)
+        for train in train_idx:
+            train_window = set(range(train, min(n_obs, train + horizon + 1)))
+            for block in test_blocks:
+                padded_test = set(
+                    range(
+                        max(0, int(block.min()) - embargo),
+                        min(n_obs, int(block.max()) + embargo + 1),
+                    )
+                )
+                assert train_window.isdisjoint(padded_test)
+
+
 def test_regularized_weights_control_exposure_and_gross():
     index = pd.Index([1, 2, 3, 5, 7, 10], name="maturity")
     loadings = pd.DataFrame(
@@ -86,17 +103,16 @@ def test_purged_splits_remove_overlapping_holding_windows():
     embargo = 3
     splits = purged_blocked_splits(index, n_splits=5, label_horizon=horizon, embargo=embargo)
     assert len(splits) == 5
-    for train_idx, test_idx in splits:
-        assert not set(train_idx).intersection(set(test_idx))
-        for train in train_idx:
-            train_window = set(range(train, min(len(index), train + horizon + 1)))
-            padded_test = set(
-                range(
-                    max(0, int(test_idx.min()) - embargo),
-                    min(len(index), int(test_idx.max()) + embargo + 1),
-                )
-            )
-            assert train_window.isdisjoint(padded_test)
+    _assert_no_holding_overlap(splits, len(index), horizon, embargo)
+
+
+def test_cpcv_splits_purge_each_non_adjacent_test_block():
+    index = pd.date_range("2020-01-01", periods=120, freq="B")
+    cfg = PurgedSplitConfig(n_groups=6, n_test_groups=2, label_horizon=12, embargo=3)
+    splits = combinatorial_purged_splits(index, cfg)
+    assert len(splits) == 15
+    assert any(np.any(np.diff(test_idx) > 1) for _, test_idx in splits)
+    _assert_no_holding_overlap(splits, len(index), cfg.label_horizon, cfg.embargo)
 
 
 def test_cpcv_validation_and_nulls_are_deterministic():
@@ -160,6 +176,8 @@ def test_cpcv_validation_and_nulls_are_deterministic():
     tail_df = student_t_tail_df_mle(curve.diff().dropna()[5])
     assert len(splits) == 15
     assert {"strategy_family", "fold", "total_pnl_bp", "ann_sharpe"}.issubset(table.columns)
+    assert table["validation_scheme"].eq("combinatorial_purged_cv").all()
+    assert table["fold"].nunique() == len(splits)
     assert subset_stats["active_days"] >= 0
     pd.testing.assert_frame_equal(null_a, null_b)
     pd.testing.assert_frame_equal(mc_a, mc_b)

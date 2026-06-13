@@ -323,7 +323,10 @@ The validation design treats strategy selection as the main overfitting risk. Th
 grid contains multiple lookbacks, entry thresholds, and transaction costs. A full-sample ranking
 would be path fitting, so the notebook evaluates pre-declared strategy families on purged and
 embargoed CPCV folds. The purge length is 42 trading days, matching the maximum holding
-period, and an additional five-day embargo is applied around test blocks.
+period, and an additional five-day embargo is applied around test blocks. This is not interpreted
+as an IID stock-style k-fold exercise. The folds are chronological Treasury-curve regimes, and
+the admissible strategy families must first obey the economics of the asset: PCA-neutral
+construction, bounded gross exposure, explicit roll/carry treatment, and transaction costs.
 
 The CPCV evidence reinforces the economic conclusion. Carry-aligned momentum has the top
 average fold results: the 21-day variant has mean total fold P\&L of 81.34 bp, positive P\&L in

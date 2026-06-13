@@ -55,6 +55,14 @@ def _contiguous_blocks(n_obs: int, n_groups: int) -> list[np.ndarray]:
     return [block.astype(int) for block in np.array_split(np.arange(n_obs), n_groups) if len(block)]
 
 
+def _split_contiguous_indices(indices: np.ndarray) -> list[np.ndarray]:
+    indices = np.sort(np.asarray(indices, dtype=int))
+    if len(indices) == 0:
+        return []
+    split_points = np.where(np.diff(indices) > 1)[0] + 1
+    return [block.astype(int) for block in np.split(indices, split_points)]
+
+
 def _purged_train_indices(
     n_obs: int,
     test_indices: np.ndarray,
@@ -74,8 +82,7 @@ def _purged_train_indices(
     keep = np.ones(n_obs, dtype=bool)
     keep[test_indices] = False
 
-    split_points = np.where(np.diff(test_indices) > 1)[0] + 1
-    for block in np.split(test_indices, split_points):
+    for block in _split_contiguous_indices(test_indices):
         block_start = max(0, int(block.min()) - int(embargo))
         block_end = min(n_obs - 1, int(block.max()) + int(embargo))
         overlaps = (starts <= block_end) & (ends >= block_start)
@@ -734,6 +741,7 @@ def strategy_family_cpcv_table(
                 {
                     "strategy_family": "carry_gated_mean_reversion",
                     "config_id": config_id,
+                    "validation_scheme": "combinatorial_purged_cv",
                     "lookback": config.lookback,
                     "entry_z": config.entry_z,
                     "transaction_cost_bp": config.transaction_cost_bp,
@@ -752,6 +760,7 @@ def strategy_family_cpcv_table(
                 {
                     "strategy_family": "carry_aligned_momentum",
                     "config_id": int(lookback),
+                    "validation_scheme": "combinatorial_purged_cv",
                     "lookback": int(lookback),
                     "entry_z": np.nan,
                     "transaction_cost_bp": 0.03,
@@ -824,6 +833,7 @@ def walk_forward_strategy_selection(
         rows.append(
             {
                 "fold": fold,
+                "validation_scheme": "purged_blocked_walk_forward",
                 "selected_config_id": config_id,
                 "selected_lookback": config.lookback,
                 "selected_entry_z": config.entry_z,

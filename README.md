@@ -18,6 +18,9 @@ claim honest: purged CPCV, nested blocked selection, residual block bootstrap,
 Student-t tail diagnostics, empirical full-curve innovations, EGARCH volatility
 clustering, and median path summaries support continued research but do not
 promote the strategy to production alpha.
+The CPCV design is chronological and rate-curve specific: folds are blocks of
+Treasury regimes, purged by the maximum holding period and embargoed around
+test windows, rather than shuffled stock-style samples.
 
 ## What is in the repo
 
@@ -77,7 +80,9 @@ The repo is written to make the strength of each claim clear:
 10. Validate strategy families with purged/embargoed CPCV, nested blocked
     model selection, factor-residual block bootstrap, empirical full-curve
     innovation resampling, Student-t tail diagnostics, EGARCH volatility
-    clustering, and median cumulative path summaries.
+    clustering, and median cumulative path summaries. The validation layer is
+    interpreted through the economics of the curve trade: PCA-neutrality,
+    roll/carry alignment, transaction costs, and bounded gross exposure.
 
 ## Data
 
